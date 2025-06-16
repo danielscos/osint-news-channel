@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.idea/ # For PyCharm/IntelliJ users
+.vscode/ # For VS Code users (can be committed if shared settings are desired, but often ignored)
+
+# Environment variables
+.env
+
+# Telethon session file
+*.session
+*.session-journal
+
+# Logs
+*.log
