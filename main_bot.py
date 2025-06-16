@@ -5,7 +5,7 @@ from telegram.constants import ParseMode
 import json
 import os
 import config
-from message_cleaner import remove_specific_ad_block
+from message_cleaner import remove_specific_ad_block, fix_triple_asterisks
 
 LAST_MESSAGE_IDS_FILE = 'last_message_ids.json'
 last_message_ids = {}
@@ -72,7 +72,8 @@ async def handle_new_source_message(event):
         last_message_ids[channel_id] = message.id
         save_last_message_ids()
         return
-    cleaned_text = remove_specific_ad_block(original_text if original_text else "")
+    # First, fix triple asterisks, then clean ads
+    cleaned_text = remove_specific_ad_block(fix_triple_asterisks(original_text if original_text else ""))
     cleaned_text = cleaned_text.strip()
     # html_text is just cleaned_text now
     # Get channel name for footer

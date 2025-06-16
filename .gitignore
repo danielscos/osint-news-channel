@@ -5,7 +5,7 @@ __pycache__/
 *.pyd
 .Python
 env/
-venv/
+venv311
 pip-log.txt
 pip-delete-this-directory.txt
 .idea/ # For PyCharm/IntelliJ users
@@ -23,3 +23,5 @@ pip-delete-this-directory.txt
 
 downloads/
 last_message_ids.json
+
+venv311

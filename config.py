@@ -20,6 +20,7 @@ SOURCE_CHANNEL_ENTITIES = [
     -1002164860351,
     -1002261999576,  # מלחמת ישראל איראן🇮🇷💥🇮🇱
     -1001745841781,  # 24X6 NEWS ISRAEL
+    -1001309313432,  # חדשות הקוסמוס
 ] # Example: [-1001234567890, -1009876543210]
 
 # List of usernames for the news channels you want to monitor (for cleaning mentions).
@@ -28,6 +29,7 @@ SOURCE_CHANNEL_USERNAMES = [
     "חדשות לפני כולם בטלגרם",
     "מלחמת ישראל איראן",
     "24X6 NEWS ISRAEL",
+    "חדשות הקוסמוס",
 ] # Example: ["bbcnews", "reuters"]
 
 # Dictionary of your target Telegram channels where translated news will be sent.
