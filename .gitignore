@@ -20,3 +20,6 @@ pip-delete-this-directory.txt
 
 # Logs
 *.log
+
+downloads/
+last_message_ids.json
