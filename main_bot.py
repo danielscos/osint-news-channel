@@ -1,14 +1,23 @@
 import asyncio
 from telethon import TelegramClient, events
 from telegram import Bot
-from telegram.constants import ParseMode
 import json
 import os
 import config
 from message_cleaner import remove_specific_ad_block, fix_triple_asterisks
+from translator import translate
+import re
+import time
+from difflib import SequenceMatcher
+import string
 
 LAST_MESSAGE_IDS_FILE = 'last_message_ids.json'
 last_message_ids = {}
+
+# Store recent messages for deduplication
+RECENT_MESSAGES = []  # List of dicts: {"text": ..., "timestamp": ...}
+RECENT_WINDOW_SECONDS = 300  # 5 minutes
+SIMILARITY_THRESHOLD = 0.92  # 92% similar or more is considered duplicate
 
 def load_last_message_ids():
     global last_message_ids
@@ -37,6 +46,37 @@ if not isinstance(config.TELETHON_API_HASH, str) or not config.TELETHON_API_HASH
 
 telegram_bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
 telethon_client = TelegramClient('session_name', config.TELETHON_API_ID, config.TELETHON_API_HASH)
+
+def markdown_to_telegram_html(text):
+    # Bold: **text** or __text__ -> <b>text</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
+    # Italic: *text* or _text_ -> <i>text</i>
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
+    text = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', r'<i>\1</i>', text)
+    # Links: [text](url) -> <a href="url">text</a>
+    text = re.sub(r'\[(.+?)\]\((https?://[^\s]+)\)', r'<a href="\2">\1</a>', text)
+    return text
+
+def normalize_text(text):
+    # Lowercase, remove punctuation, collapse whitespace
+    text = text.lower()
+    text = text.translate(str.maketrans('', '', string.punctuation))
+    text = ' '.join(text.split())
+    return text
+
+def is_similar_to_recent(text):
+    now = time.time()
+    # Remove old messages from RECENT_MESSAGES
+    global RECENT_MESSAGES
+    RECENT_MESSAGES = [msg for msg in RECENT_MESSAGES if now - msg["timestamp"] < RECENT_WINDOW_SECONDS]
+    norm_text = normalize_text(text)
+    for msg in RECENT_MESSAGES:
+        norm_recent = normalize_text(msg["text"])
+        similarity = SequenceMatcher(None, norm_text, norm_recent).ratio()
+        if similarity >= SIMILARITY_THRESHOLD:
+            return True
+    return False
 
 @telethon_client.on(events.NewMessage(chats=config.SOURCE_CHANNEL_ENTITIES))
 async def handle_new_source_message(event):
@@ -75,53 +115,100 @@ async def handle_new_source_message(event):
     # First, fix triple asterisks, then clean ads
     cleaned_text = remove_specific_ad_block(fix_triple_asterisks(original_text if original_text else ""))
     cleaned_text = cleaned_text.strip()
-    # html_text is just cleaned_text now
-    # Get channel name for footer
+
+    # Convert cleaned_text and translated_text from Markdown to Telegram HTML
+    cleaned_text_html = markdown_to_telegram_html(cleaned_text) if cleaned_text else ""
+
+    # Get channel name for footer (move this up before sending)
     try:
         entity = await telethon_client.get_entity(channel_id)
         channel_name = getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(channel_id)
     except Exception:
         channel_name = str(channel_id)
-    # Only forward to the Hebrew channel
-    target_channel_info = config.TARGET_CHANNELS["he"]
-    target_channel_id = target_channel_info["id"]
-    final_caption = f"<b>News:</b>\n{cleaned_text}\n\n(<i>{channel_name}</i>)"
-    if not cleaned_text.strip() and not media_file_path:
-        print("Skipping empty message after cleaning.")
-        last_message_ids[channel_id] = message.id
-        save_last_message_ids()
-        return
+
+    final_caption = f"<b>News:</b>\n{cleaned_text_html}\n\n(<i>{channel_name}</i>)"
+
+    # Send Hebrew message immediately
+    hebrew_media_sent = False
+    target_channel_info_he = config.TARGET_CHANNELS["he"]
+    target_channel_id_he = target_channel_info_he["id"]
     try:
         if media_file_path:
             with open(media_file_path, 'rb') as f:
                 if message.photo:
                     await telegram_bot.send_photo(
-                        chat_id=target_channel_id,
+                        chat_id=target_channel_id_he,
                         photo=f,
                         caption=final_caption,
                         parse_mode="HTML"
                     )
+                    hebrew_media_sent = True
                 elif message.video:
                     await telegram_bot.send_video(
-                        chat_id=target_channel_id,
+                        chat_id=target_channel_id_he,
                         video=f,
                         caption=final_caption,
                         parse_mode="HTML"
                     )
+                    hebrew_media_sent = True
         elif cleaned_text.strip():
             await telegram_bot.send_message(
-                chat_id=target_channel_id,
+                chat_id=target_channel_id_he,
                 text=final_caption,
                 parse_mode="HTML"
             )
     except Exception as e:
-        print(f"Error forwarding message: {e}")
-    finally:
-        if media_file_path and os.path.exists(media_file_path):
-            try:
-                os.remove(media_file_path)
-            except Exception as e:
-                print(f"Error removing media file: {e}")
+        print(f"Error forwarding message to Hebrew channel: {e}")
+
+    # Translate and send to English channel (if translation is available)
+    translated_text = ""
+    translated_text_html = ""
+    if cleaned_text:
+        try:
+            translated_text = translate(cleaned_text, from_lang="he", to_lang="en")
+            translated_text_html = markdown_to_telegram_html(translated_text) if translated_text else ""
+        except Exception as e:
+            print(f"Translation error: {e}")
+            translated_text = ""
+            translated_text_html = ""
+
+    if translated_text:
+        target_channel_info_en = config.TARGET_CHANNELS["en"]
+        target_channel_id_en = target_channel_info_en["id"]
+        final_caption_en = f"<b>News (EN):</b>\n{translated_text_html}\n\n(<i>{channel_name}</i>)"
+        try:
+            if media_file_path and hebrew_media_sent:
+                with open(media_file_path, 'rb') as f:
+                    if message.photo:
+                        await telegram_bot.send_photo(
+                            chat_id=target_channel_id_en,
+                            photo=f,
+                            caption=final_caption_en,
+                            parse_mode="HTML"
+                        )
+                    elif message.video:
+                        await telegram_bot.send_video(
+                            chat_id=target_channel_id_en,
+                            video=f,
+                            caption=final_caption_en,
+                            parse_mode="HTML"
+                        )
+            else:
+                await telegram_bot.send_message(
+                    chat_id=target_channel_id_en,
+                    text=final_caption_en,
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            print(f"Error forwarding message to English channel: {e}")
+
+    # Only delete the media file after both sends
+    if media_file_path and os.path.exists(media_file_path):
+        try:
+            os.remove(media_file_path)
+        except Exception as e:
+            print(f"Error removing media file: {e}")
+
     last_message_ids[channel_id] = message.id
     save_last_message_ids()
 
@@ -135,6 +222,26 @@ async def main():
     await telethon_client.run_until_disconnected()
 
 if __name__ == '__main__':
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == 'dedup_test':
+        print("Deduplication test mode. Type messages, Ctrl+D to end.")
+        try:
+            while True:
+                print("\nEnter message:")
+                msg = sys.stdin.readline()
+                if not msg:
+                    break
+                msg = msg.strip()
+                if not msg:
+                    continue
+                if is_similar_to_recent(msg):
+                    print("[SKIPPED] Similar to recent message.")
+                else:
+                    print("[SENT] Message accepted.")
+                    RECENT_MESSAGES.append({"text": msg, "timestamp": time.time()})
+        except KeyboardInterrupt:
+            print("\nTest ended by user.")
+        sys.exit(0)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
