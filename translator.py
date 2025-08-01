@@ -11,7 +11,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 def translate(text, from_lang="he", to_lang="en"):
     # Use Gemini to translate text from Hebrew to English
-    prompt = f"Translate the following text from Hebrew to English. Only output the translation, no explanation.\n\nText: {text}"
+    prompt = f"Translate the following tex to English. Only output the translation, no explanation.\n\nText: {text}"
     model = genai.GenerativeModel("gemini-2.0-flash")
     response = model.generate_content(prompt)
     # The response.text contains the translation

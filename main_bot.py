@@ -4,7 +4,7 @@ from telegram import Bot
 import json
 import os
 import config
-from message_cleaner import remove_specific_ad_block, fix_triple_asterisks
+from message_cleaner import clean_message, remove_specific_ad_block
 from translator import translate
 import re
 import time
@@ -78,6 +78,26 @@ def is_similar_to_recent(text):
             return True
     return False
 
+def extract_red_alert_summary(text):
+    import re
+    # Detect if this is a Red Alert message
+    if "צבע אדום" not in text:
+        return None
+    # Extract date/time
+    date_time_match = re.search(r"(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}:\d{2})", text)
+    date_time = f"{date_time_match.group(1)} {date_time_match.group(2)}" if date_time_match else ""
+    # Extract main regions (lines starting with • and ending with colon)
+    regions = re.findall(r"•\s*([^:]+):", text)
+    regions_str = ", ".join(regions) if regions else "אזורים לא ידועים"
+    # Extract instruction (look for 'היכנסו למרחב המוגן' or similar)
+    instruction_match = re.search(r"היכנסו למרחב המוגן[^\n]*", text)
+    instruction = instruction_match.group(0) if instruction_match else ""
+    # Build summary
+    summary = f"🚨 צבע אדום (Red Alert){' - ' + date_time if date_time else ''}\nאזורים עיקריים: {regions_str}"
+    if instruction:
+        summary += f"\n{instruction}"
+    return summary
+
 @telethon_client.on(events.NewMessage(chats=config.SOURCE_CHANNEL_ENTITIES))
 async def handle_new_source_message(event):
     message = event.message
@@ -112,9 +132,31 @@ async def handle_new_source_message(event):
         last_message_ids[channel_id] = message.id
         save_last_message_ids()
         return
-    # First, fix triple asterisks, then clean ads
-    cleaned_text = remove_specific_ad_block(fix_triple_asterisks(original_text if original_text else ""))
-    cleaned_text = cleaned_text.strip()
+    # Only allow alerts from פיקוד העורף, and only allow news from other channels
+    pikud_haoref_id = -1001441886157
+    is_pikud_haoref = (channel_id == pikud_haoref_id)
+    cleaned_alert = clean_message(original_text if original_text else "")
+    is_alert = cleaned_alert != remove_specific_ad_block(original_text)
+    # If the message is just an ad (fully removed), skip sending and skip media
+    ad_only = cleaned_alert.strip() == ''
+    if ad_only:
+        print(f"Skipping ad-only message (and media) from channel_id: {channel_id}")
+        last_message_ids[channel_id] = message.id
+        save_last_message_ids()
+        return
+    if is_pikud_haoref:
+        if not is_alert:
+            print(f"Skipping non-alert from פיקוד העורף: {channel_id}")
+            last_message_ids[channel_id] = message.id
+            save_last_message_ids()
+            return
+    else:
+        if is_alert:
+            print(f"Skipping alert from non-authoritative channel: {channel_id}")
+            last_message_ids[channel_id] = message.id
+            save_last_message_ids()
+            return
+    cleaned_text = cleaned_alert.strip()
 
     # Convert cleaned_text and translated_text from Markdown to Telegram HTML
     cleaned_text_html = markdown_to_telegram_html(cleaned_text) if cleaned_text else ""
@@ -125,6 +167,14 @@ async def handle_new_source_message(event):
         channel_name = getattr(entity, 'title', None) or getattr(entity, 'username', None) or str(channel_id)
     except Exception:
         channel_name = str(channel_id)
+
+    # Add פיקוד העורף footer if relevant
+    pikud_haoref_ids = {-1001441886157}
+    pikud_haoref_names = {"פיקוד העורף", "Home Front Command"}
+    is_pikud_haoref = (channel_id in pikud_haoref_ids) or (str(channel_name).strip() in pikud_haoref_names)
+    pikud_footer = "\n\nהודעה זו התקבלה מפיקוד העורף"
+    cleaned_text_with_footer = cleaned_text + pikud_footer if is_pikud_haoref else cleaned_text
+    cleaned_text_html = markdown_to_telegram_html(cleaned_text_with_footer) if cleaned_text_with_footer else ""
 
     final_caption = f"<b>News:</b>\n{cleaned_text_html}\n\n(<i>{channel_name}</i>)"
 
@@ -165,7 +215,7 @@ async def handle_new_source_message(event):
     translated_text_html = ""
     if cleaned_text:
         try:
-            translated_text = translate(cleaned_text, from_lang="he", to_lang="en")
+            translated_text = translate(cleaned_text_with_footer, from_lang="he", to_lang="en") if is_pikud_haoref else translate(cleaned_text, from_lang="he", to_lang="en")
             translated_text_html = markdown_to_telegram_html(translated_text) if translated_text else ""
         except Exception as e:
             print(f"Translation error: {e}")
@@ -239,6 +289,57 @@ if __name__ == '__main__':
                 else:
                     print("[SENT] Message accepted.")
                     RECENT_MESSAGES.append({"text": msg, "timestamp": time.time()})
+        except KeyboardInterrupt:
+            print("\nTest ended by user.")
+        sys.exit(0)
+    elif len(sys.argv) > 1 and sys.argv[1] == 'full_test':
+        # Full bot logic test mode (loop)
+        import sys
+        import config
+        from message_cleaner import clean_message, remove_specific_ad_block
+        channel_map = {}
+        for idx, cid in enumerate(config.SOURCE_CHANNEL_ENTITIES):
+            name = None
+            if idx < len(config.SOURCE_CHANNEL_USERNAMES):
+                name = config.SOURCE_CHANNEL_USERNAMES[idx]
+            channel_map[str(idx+1)] = (cid, name)
+        print("\nFull bot test mode. Ctrl+C to exit.")
+        try:
+            while True:
+                print("\nAvailable channels:")
+                for num, (cid, name) in channel_map.items():
+                    print(f"{num}. {name or cid} (ID: {cid})")
+                choice = input("\nSelect a channel by number: ").strip()
+                if choice not in channel_map:
+                    print("Invalid choice. Try again.")
+                    continue
+                channel_id, channel_name = channel_map[choice]
+                print(f"\nPaste your test message for {channel_name or channel_id} (end with Ctrl+D):")
+                input_text = sys.stdin.read()
+                print("\n--- Original ---\n" + input_text)
+                # Deduplication check
+                if is_similar_to_recent(input_text):
+                    print("\n[SKIPPED] Similar to recent message (deduplication). Would NOT be sent.")
+                    continue
+                # Alert logic (same as in handler)
+                pikud_haoref_id = -1001441886157
+                is_pikud_haoref = (channel_id == pikud_haoref_id)
+                cleaned_alert = clean_message(input_text)
+                is_alert = cleaned_alert != remove_specific_ad_block(input_text)
+                if is_pikud_haoref:
+                    if is_alert:
+                        print("\n[SENT] This alert WOULD be sent (פיקוד העורף, alert type).\n")
+                        print("--- After cleaning ---\n" + cleaned_alert)
+                        RECENT_MESSAGES.append({"text": input_text, "timestamp": time.time()})
+                    else:
+                        print("\n[SKIPPED] Not an alert (פיקוד העורף, but not alert type). Would NOT be sent.")
+                else:
+                    if is_alert:
+                        print("\n[SKIPPED] Alert, but not from פיקוד העורף. Would NOT be sent.")
+                    else:
+                        print("\n[SENT] This news WOULD be sent (regular news from other channel).\n")
+                        print("--- After cleaning ---\n" + cleaned_alert)
+                        RECENT_MESSAGES.append({"text": input_text, "timestamp": time.time()})
         except KeyboardInterrupt:
             print("\nTest ended by user.")
         sys.exit(0)
